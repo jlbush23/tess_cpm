@@ -22,7 +22,9 @@ from astropy.io import fits
 from astropy.table import Table
 #from astropy.table import Column
 
-#import tess_cpm
+import tess_cpm
+
+import pickle as pkl
 #import lightkurve as lk
 
 
@@ -92,7 +94,7 @@ class cpm_interface:
             self.download_path = download_path
             os.mkdir(download_path)
             
-    def download(self, k=5, n=35, size = 32, exlusion_size = 5, pred_pix_method = "cosine_similarity", save_lc = True, keep_tesscut = False, add_poly = False, poly_scale = 2, poly_num_terms = 4):   
+    def download_extract(self, k=5, n=35, size = 32, exclusion_size = 5, pred_pix_method = "cosine_similarity", save_lc = True, keep_tesscut = False, add_poly = False, poly_scale = 2, poly_num_terms = 4):   
         '''
         This function downloads the TESS Cut for the desired target. If TIC ID 
         is available, it downloads by TIC ID. Otherwise it downloads by ra/dec.
@@ -119,7 +121,7 @@ class cpm_interface:
         size : TYPE, optional
             The size of the TESS Cut cutout. A "size" x "size" cutout will be
             downloaded. The default is 32, possibly 50, max suggested is 100.
-        exlusion_size : TYPE, optional
+        exclusion_size : TYPE, optional
             The "exclusion_size" x "exclusion_size" box centered around the
             target that prevents pixels associated with the target from 
             being picked as one of the 'n' predictor pixels.The default is 5.
@@ -156,59 +158,6 @@ class cpm_interface:
         '''
         
         
-        def lc_extract():
-            if self.use_tic == True:
-                cpm_lc_df_fn = "tic" + str(self.tic) + "_cpm_LC.pkl"
-                self.save_fn = cpm_lc_df_fn
-            if self.use_tic == False:
-                cpm_lc_df_fn = "ra" + str(self.ra) + "_dec" + str(self.dec) + "_cpm_LC.pkl"
-                self.save_fn = cpm_lc_df_fn
-            
-            TESS_cuts = os.listdir(self.download_path)
-            cpm_lc_df_list = []
-            
-            for cut in TESS_cuts:
-                sector = cut.split("-")[1][-2:]
-                
-                temp_cut_fn = os.path.join(self.download_path,cut)
-                
-                with fits.open(temp_cut_fn, mode="readonly") as hdu:
-                    x_cen = int(round(hdu[1].header["1CRPX4"]))
-                    y_cen = int(round(hdu[1].header["2CRPX4"]))
-                             
-                temp_source = tess_cpm.Source(temp_cut_fn, remove_bad=True)            
-                temp_source.set_aperture(rowlims=[y_cen-1,y_cen+1], collims=[x_cen-1, y_cen+1])            
-                temp_source.add_cpm_model(exclusion_size = exclusion_size, n=n, predictor_method = choose_pred_pix);  
-                #_ = s.models[0][0].plot_model() #plot selected pixels 
-                if add_poly == True:
-                    temp_source.add_poly_model(scale = poly_scale, num_terms = poly_num_terms); 
-                    temp_source.set_regs([0.01,0.1])#first in list is for cpm model, second in list is for poly model          
-                else:
-                    temp_source.set_regs([0.1]) #In the current implementation the value is the reciprocal of the prior variance (i.e., precision) on the coefficients
-                temp_source.holdout_fit_predict(k=k)            
-                time = temp_source.time            
-                flux = temp_source.get_aperture_lc(data_type="cpm_subtracted_flux")            
-                sector = np.repeat(a=sector, repeats = len(time))            
-                lc_table = Table([time,flux,sector], names = ['time','cpm','sector'])            
-                lc_df = lc_table.to_pandas()            
-                cpm_lc_df_list.append(lc_df) 
-            
-            del temp_source
-            
-            cpm_lc_df = pd.concat(cpm_lc_df_list)
-            if save_lc == True:
-                if keep_tesscut == False:
-                    save_path = os.path.join(self.parent_folder,cpm_lc_df_fn)
-                    with open(save_path,'wb') as outfile:
-                        pkl.dump(cpm_lc_df,outfile)
-                    shutil.rmtree(self.download_path)
-                else:
-                    save_path = os.path.join(self.download_path,cpm_lc_df_fn)
-                    with open(save_path,'wb') as outfile:
-                        pkl.dump(cpm_lc_df,outfile)
-            self.lc_df = cpm_lc_df
-        
-        
         # do the downloading
         try:        
             if self.use_tic == True: #if tic is available, get tesscut by tic
@@ -221,6 +170,7 @@ class cpm_interface:
                 
             if len(manifest) > 0:
                 self.query_success = "success"
+                self.cutout_size = size
             if len(manifest) == 0:
                 self.query_success = "fail"
                 shutil.rmtree(self.download_path)
@@ -229,5 +179,144 @@ class cpm_interface:
             
         #run all the desired extractions
         if self.query_success == "success":
-            self.lc_extract()
+            cpm_lc_df = self.lc_extract(k=k, n=n, size = size, exclusion_size = exclusion_size, pred_pix_method = pred_pix_method,add_poly = add_poly, poly_scale = poly_scale, poly_num_terms = poly_num_terms)
+            if save_lc == True:
+                if keep_tesscut == False:
+                    save_path = os.path.join(self.parent_folder,self.cpm_lc_df_fn)
+                    with open(save_path,'wb') as outfile:
+                        pkl.dump(cpm_lc_df,outfile)
+                    shutil.rmtree(self.download_path)
+                else:
+                    save_path = os.path.join(self.download_path,self.cpm_lc_df_fn)
+                    with open(save_path,'wb') as outfile:
+                        pkl.dump(cpm_lc_df,outfile)
+            self.lc_df = cpm_lc_df
+                
+          
+    def lc_extract(self, path_to_tesscuts, k = 5, n = 35, l2_reg = [0.1], exclusion_size = 5, pred_pix_method = "cosine_similarity", add_poly = False, poly_scale = 2, poly_num_terms = 4):
+        if self.use_tic == True:
+            self.cpm_lc_df_fn = "tic" + str(self.tic) + "_cpm_LC.pkl"
             
+        if self.use_tic == False:
+            self.cpm_lc_df_fn = "ra" + str(self.ra) + "_dec" + str(self.dec) + "_cpm_LC.pkl"
+            
+        
+        TESS_cuts = os.listdir(path_to_tesscuts)
+        cpm_lc_df_list = []
+        
+        for cut in TESS_cuts:
+            print(cut)
+            sector = cut.split("-")[1][-2:]
+            
+            temp_cut_fn = os.path.join(path_to_tesscuts,cut)
+            
+            with fits.open(temp_cut_fn, mode="readonly") as hdu:
+                x_cen = int(round(hdu[1].header["1CRPX4"]))
+                y_cen = int(round(hdu[1].header["2CRPX4"]))
+            
+            
+            temp_source = tess_cpm.Source(temp_cut_fn, remove_bad=True)            
+            temp_source.set_aperture(rowlims=[y_cen-1,y_cen+1], collims=[x_cen-1, y_cen+1])            
+            temp_source.add_cpm_model(exclusion_size = exclusion_size, n=n, predictor_method = pred_pix_method);  
+            #_ = s.models[0][0].plot_model() #plot selected pixels 
+            if add_poly == True:
+                temp_source.add_poly_model(scale = poly_scale, num_terms = poly_num_terms); 
+                temp_source.set_regs(l2_reg)# needs to be list, like [0.01,0.1] - first in list is for cpm model, second in list is for poly model          
+            else:
+                temp_source.set_regs(l2_reg) #In the current implementation the value is the reciprocal of the prior variance (i.e., precision) on the coefficients
+            temp_source.holdout_fit_predict(k=k)            
+            time = temp_source.time            
+            flux = temp_source.get_aperture_lc(data_type="cpm_subtracted_flux")            
+            sector = np.repeat(a=sector, repeats = len(time))            
+            lc_table = Table([time,flux,sector], names = ['time','cpm','sector'])            
+            lc_df = lc_table.to_pandas()            
+            cpm_lc_df_list.append(lc_df) 
+        
+        del temp_source
+        
+        cpm_lc_df = pd.concat(cpm_lc_df_list)
+        self.lc_df = cpm_lc_df
+        return(cpm_lc_df)
+    
+    def multi_extract(self, path_to_tesscuts, k=[5], n=[35], exclusion_size = [5], l2_reg = [0.1], pred_pix_method = ["cosine_similarity"], add_poly = False, poly_scale = 2, poly_num_terms = 4):   
+        '''
+        fill in description
+        Parameters
+        ----------
+        
+
+        Returns
+        -------
+        The CPM LC pandas dataframe as an attribute of the cpm_interface
+        object.
+
+        '''
+        i = 0
+        for N in n:
+            for exclusion in exclusion_size:
+                for choose_pix in pred_pix_method:
+                    for K in k:
+                        for reg in l2_reg:
+                            temp_lc = self.lc_extract(path_to_tesscuts = path_to_tesscuts, 
+                                                   k=K ,n=N, exclusion_size=exclusion,
+                                                   l2_reg = reg, pred_pix_method=choose_pix)
+                            ## add cutout size to flux title!
+                            flux_type = choose_pix[0] + '_s' + str(self.cutout_size) + '_n' + str(N) + '_ex' + str(exclusion) + '_k' + str(K) + '_l2-' + str(reg[0])
+                            if i == 0:
+                                multi_lc_df = temp_lc.rename(columns = {'cpm':flux_type})
+                            if i > 0:
+                                multi_lc_df[flux_type] = temp_lc['cpm']
+                            i=i+1
+                    
+        self.multi_lc = multi_lc_df
+        
+        
+    def download_tesscut(self,size = 32, sector = None):
+        # do the downloading
+        try:        
+            if self.use_tic == True: #if tic is available, get tesscut by tic
+                manifest = Tesscut.download_cutouts(size=size, sector=sector, path=self.download_path, inflate=True, objectname="TIC " + str(self.tic))
+                self.manifest = manifest
+            else: #otherwise use the ra/dec coordinates
+                cutout_coord = SkyCoord(float(self.ra), float(self.dec), unit="deg")
+                manifest = Tesscut.download_products(coordinates=cutout_coord, size = size, sector = sector, path=self.download_path, inflate=True)
+                self.manifest = manifest
+                
+            if len(manifest) > 0:
+                self.query_success = "success"
+                self.cutout_size = size
+            if len(manifest) == 0:
+                self.query_success = "fail"
+                shutil.rmtree(self.download_path) #delete download directory if cutout download fails
+        except:
+            self.query_success = "fail"
+            
+        
+        
+        
+        
+        
+    def save_lc(self,multi = False, keep_tesscut = False):
+        '''
+
+        Returns
+        -------
+        None.
+
+        '''
+        if keep_tesscut == False:
+            save_path = os.path.join(self.parent_folder,self.cpm_lc_df_fn)
+            with open(save_path,'wb') as outfile:
+                if multi==False: pkl.dump(self.lc_df,outfile)
+                if multi==True: pkl.dump(self.multi_lc,outfile)
+            shutil.rmtree(self.download_path)
+        else:
+            save_path = os.path.join(self.download_path,self.cpm_lc_df_fn)
+            with open(save_path,'wb') as outfile:
+                pkl.dump(cpm_lc_df,outfile)
+
+
+        
+        
+        
+        
